@@ -1,20 +1,18 @@
 import type { Metadata } from "next";
 import { listSkills, type Skill } from "@/lib/skills";
+import { HackathonPhases } from "@/components/hackathon-phases";
+import { sanitizeHttpHref } from "@/lib/url-safety";
 import { CodeBlock } from "./code-block";
 import { SubmitForm } from "./submit-form";
-
 export const dynamic = "force-dynamic";
-
 export const metadata: Metadata = {
   title: "SkillMD — Nanda Town",
   description:
     "Teach an OpenClaw agent a new trick. Write a SkillMD, host your endpoints, and submit it here.",
 };
-
 /* ------------------------------------------------------------------ */
 /*  Small presentational helpers                                       */
 /* ------------------------------------------------------------------ */
-
 function Section({
   eyebrow,
   title,
@@ -34,7 +32,6 @@ function Section({
     </section>
   );
 }
-
 function InlineCode({ children }: { children: React.ReactNode }) {
   return (
     <code className="rounded-md border border-cream-400/70 bg-cream-200 px-1.5 py-0.5 font-mono text-[0.85em] text-rust">
@@ -42,13 +39,11 @@ function InlineCode({ children }: { children: React.ReactNode }) {
     </code>
   );
 }
-
 const TYPE_LABEL: Record<Skill["source_type"], string> = {
   url: "Hosted link",
   github: "GitHub",
   content: "Pasted",
 };
-
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString("en-US", {
     year: "numeric",
@@ -56,38 +51,28 @@ function formatDate(iso: string): string {
     day: "numeric",
   });
 }
-
 /* ------------------------------------------------------------------ */
 /*  Example + API snippets                                             */
 /* ------------------------------------------------------------------ */
-
 const EXAMPLE_SKILL = `# Weather Lookup
-
 Get the current weather for any city.
-
 ## Base URL
 https://weather.example.com
-
 ## Endpoints
-
 GET /weather?city={city}
   Returns the current weather for one city.
   Example:
     curl "https://weather.example.com/weather?city=Boston"
   Response:
     { "city": "Boston", "tempF": 64, "sky": "cloudy" }
-
 ## How the agent should use this
 1. Ask the user which city they want.
 2. Call GET /weather with that city.
 3. Read tempF and sky from the answer, then tell the user.`;
-
 const API_LIST = `# List every SkillMD
 curl https://nandatown.projectnanda.org/api/skills
-
 # Get one SkillMD
 curl https://nandatown.projectnanda.org/api/skills/<id>`;
-
 const API_POST = `curl -X POST https://nandatown.projectnanda.org/api/skills \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -96,14 +81,11 @@ const API_POST = `curl -X POST https://nandatown.projectnanda.org/api/skills \\
     "source_url": "https://weather.example.com/skill.md",
     "endpoints": "GET /weather?city={city}"
   }'`;
-
 /* ================================================================== */
 /*  Page                                                               */
 /* ================================================================== */
-
 export default async function SkillsPage() {
   const skills = await listSkills();
-
   return (
     <div className="bg-cream-100">
       {/* ---------------------------------------------------------- */}
@@ -125,8 +107,27 @@ export default async function SkillsPage() {
           </p>
         </div>
       </section>
-
       <div className="mx-auto max-w-3xl px-6 pb-24 sm:px-10">
+        {/* ---------------------------------------------------------- */}
+        {/*  SUBMIT FORM (moved to top of page)                          */}
+        {/* ---------------------------------------------------------- */}
+        <Section eyebrow="Submit it" title="Add your SkillMD">
+          <p className="mb-7 text-[1.05rem] leading-[1.7] text-ink-500">
+            Three ways to send it: a public link to the file, a GitHub repo, or
+            paste the text. We save it to the registry so agents can find it.
+          </p>
+          <div className="rounded-3xl border border-cream-400/70 bg-cream-200/50 p-7 sm:p-9">
+            <SubmitForm />
+          </div>
+        </Section>
+        <div className="h-px bg-cream-400/70" />
+        {/* ---------------------------------------------------------- */}
+        {/*  TWO-PHASE HACKATHON BLOCK                                   */}
+        {/* ---------------------------------------------------------- */}
+        <section className="py-10">
+          <HackathonPhases />
+        </section>
+        <div className="h-px bg-cream-400/70" />
         {/* ---------------------------------------------------------- */}
         {/*  WHAT IS IT                                                  */}
         {/* ---------------------------------------------------------- */}
@@ -167,9 +168,7 @@ export default async function SkillsPage() {
             </div>
           </div>
         </Section>
-
         <div className="h-px bg-cream-400/70" />
-
         {/* ---------------------------------------------------------- */}
         {/*  WHAT YOU NEED                                               */}
         {/* ---------------------------------------------------------- */}
@@ -229,9 +228,7 @@ export default async function SkillsPage() {
             ))}
           </ol>
         </Section>
-
         <div className="h-px bg-cream-400/70" />
-
         {/* ---------------------------------------------------------- */}
         {/*  WRITE ONE                                                   */}
         {/* ---------------------------------------------------------- */}
@@ -247,24 +244,7 @@ export default async function SkillsPage() {
             plain words.
           </p>
         </Section>
-
         <div className="h-px bg-cream-400/70" />
-
-        {/* ---------------------------------------------------------- */}
-        {/*  SUBMIT FORM                                                 */}
-        {/* ---------------------------------------------------------- */}
-        <Section eyebrow="Submit it" title="Add your SkillMD">
-          <p className="mb-7 text-[1.05rem] leading-[1.7] text-ink-500">
-            Three ways to send it: a public link to the file, a GitHub repo, or
-            paste the text. We save it to the registry so agents can find it.
-          </p>
-          <div className="rounded-3xl border border-cream-400/70 bg-cream-200/50 p-7 sm:p-9">
-            <SubmitForm />
-          </div>
-        </Section>
-
-        <div className="h-px bg-cream-400/70" />
-
         {/* ---------------------------------------------------------- */}
         {/*  API                                                         */}
         {/* ---------------------------------------------------------- */}
@@ -279,9 +259,7 @@ export default async function SkillsPage() {
           </p>
           <CodeBlock title="Register">{API_POST}</CodeBlock>
         </Section>
-
         <div className="h-px bg-cream-400/70" />
-
         {/* ---------------------------------------------------------- */}
         {/*  LIST                                                        */}
         {/* ---------------------------------------------------------- */}
@@ -307,18 +285,15 @@ export default async function SkillsPage() {
     </div>
   );
 }
-
 /* ------------------------------------------------------------------ */
 /*  Submission card                                                    */
 /* ------------------------------------------------------------------ */
-
 function SkillCard({ skill }: { skill: Skill }) {
   const tags = (skill.tags ?? "")
     .split(",")
     .map((t) => t.trim())
     .filter(Boolean);
   const showReach = skill.source_type === "url" || skill.source_type === "github";
-
   return (
     <div className="rounded-2xl border border-cream-400/70 bg-cream-50 p-6 transition-colors hover:border-ink-300">
       <div className="flex items-start justify-between gap-4">
@@ -334,19 +309,16 @@ function SkillCard({ skill }: { skill: Skill }) {
           {TYPE_LABEL[skill.source_type]}
         </span>
       </div>
-
       {skill.description && (
         <p className="mt-3 text-[0.97rem] leading-[1.6] text-ink-500">
           {skill.description}
         </p>
       )}
-
       {skill.endpoints && (
         <pre className="mt-4 overflow-x-auto rounded-lg border border-cream-400/70 bg-cream-100 p-3 font-mono text-[0.78rem] leading-relaxed text-ink-600">
           {skill.endpoints}
         </pre>
       )}
-
       {tags.length > 0 && (
         <div className="mt-4 flex flex-wrap gap-1.5">
           {tags.map((tag) => (
@@ -359,10 +331,8 @@ function SkillCard({ skill }: { skill: Skill }) {
           ))}
         </div>
       )}
-
       <div className="mt-5 flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-cream-400/70 pt-4 text-[0.82rem] text-ink-400">
         <span>{formatDate(skill.created_at)}</span>
-
         {showReach &&
           (skill.reachable ? (
             <span className="inline-flex items-center gap-1.5 text-sage">
@@ -375,17 +345,19 @@ function SkillCard({ skill }: { skill: Skill }) {
               couldn’t reach link
             </span>
           ))}
-
-        {skill.source_url && (
-          <a
-            href={skill.source_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="font-medium text-rust hover:text-ink-900"
-          >
-            Open source ↗
-          </a>
-        )}
+        {(() => {
+          const safeHref = sanitizeHttpHref(skill.source_url);
+          return safeHref ? (
+            <a
+              href={safeHref}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-medium text-rust hover:text-ink-900"
+            >
+              Open source ↗
+            </a>
+          ) : null;
+        })()}
         <a
           href={`/api/skills/${skill.id}`}
           className="font-medium text-ink-500 hover:text-ink-900"

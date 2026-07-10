@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Nanda Town CLI entry point.
-
 Example::
-
     nest run scenarios/marketplace.yaml
     nest doctor
     nest init my-scenario
@@ -12,9 +10,10 @@ Example::
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import typer
 from pydantic import ValidationError
@@ -33,25 +32,22 @@ app = typer.Typer(
     help="Nanda Town",
     no_args_is_help=True,
 )
-
 plugins_app = typer.Typer(help="Manage plugins.")
 app.add_typer(plugins_app, name="plugins")
-
 scenarios_app = typer.Typer(help="Inspect and copy built-in scenarios.")
 app.add_typer(scenarios_app, name="scenarios")
-
 templates_app = typer.Typer(help="Manage agent templates.")
 app.add_typer(templates_app, name="templates")
+worker_app = typer.Typer(help="Run distributed simulation workers.")
+app.add_typer(worker_app, name="worker")
 
 
 def _resolve_scenario_arg(scenario: str) -> Path | None:
     """Resolve a `nest run` argument to a real YAML path.
-
     Resolution order, first hit wins:
       1. ``scenario`` is an existing file path.
       2. ``scenario`` is the name of a built-in scenario shipped in the wheel.
       3. ``./scenarios/<scenario>.yaml`` relative to the current directory.
-
     Returns ``None`` if nothing resolves.
     """
     from nest_core.builtin_scenarios import builtin_path, is_builtin
@@ -78,6 +74,32 @@ def run(
     seed: int | None = _typer_option(None, help="Override the scenario seed."),
     ticks: int | None = _typer_option(None, help="Override max ticks."),
     output: str | None = _typer_option(None, "-o", "--output", help="Override trace output path."),
+    parallel: bool = _typer_option(
+        False,
+        "--parallel",
+        help="Enable non-deterministic parallel agent execution (faster, not byte-identical).",
+    ),
+    workers: int = _typer_option(
+        1,
+        "--workers",
+        min=1,
+        help="Split agents across N worker processes (implies --parallel when N>1).",
+    ),
+    worker_bind: str | None = _typer_option(
+        None,
+        "--worker-bind",
+        help="HTTP bind address for worker bridges (default 127.0.0.1; use 0.0.0.0 for LAN).",
+    ),
+    worker_hosts: str | None = _typer_option(
+        None,
+        "--worker-hosts",
+        help="Comma-separated advertise hosts for each worker (multi-machine routing).",
+    ),
+    worker_mode: str | None = _typer_option(
+        None,
+        "--worker-mode",
+        help="Worker launch mode: auto (spawn subprocesses) or manual (wait for remote workers).",
+    ),
 ) -> None:
     """Run a scenario from a YAML file or a built-in scenario name."""
     from nest_core.builtin_scenarios import list_builtin
@@ -97,7 +119,6 @@ def run(
             err=True,
         )
         raise typer.Exit(1)
-
     try:
         config = ScenarioConfig.from_yaml(path)
     except ValidationError as e:
@@ -106,14 +127,23 @@ def run(
             loc = ".".join(str(p) for p in err["loc"])
             typer.echo(f"  {loc}: {err['msg']}", err=True)
         raise typer.Exit(1) from None
-
     if seed is not None:
         config.seed = seed
     if ticks is not None:
         config.duration = f"ticks: {ticks}"
     if output is not None:
         config.output.trace = output
-
+    if parallel:
+        config.parallel = True
+    if workers > 1:
+        config.workers = workers
+        config.parallel = True
+    if worker_bind is not None:
+        config.worker_bind = worker_bind
+    if worker_hosts is not None:
+        config.worker_hosts = [h.strip() for h in worker_hosts.split(",") if h.strip()]
+    if worker_mode is not None:
+        config.worker_mode = worker_mode
     max_ticks = config.get_max_ticks()
     if max_ticks <= 0:
         typer.echo(
@@ -127,10 +157,16 @@ def run(
             err=True,
         )
         raise typer.Exit(1)
-
     typer.echo(f"Running scenario: {config.name}")
     typer.echo(f"  agents: {config.agents.count}  seed: {config.seed}  ticks: {max_ticks}")
-
+    if config.parallel:
+        typer.echo("  mode: parallel (traces may not be byte-identical)")
+    if config.workers > 1:
+        typer.echo(f"  workers: {config.workers} (distributed, non-deterministic)")
+        if config.worker_mode == "manual":
+            typer.echo("  worker mode: manual (waiting for remote workers)")
+        if config.worker_hosts:
+            typer.echo(f"  worker hosts: {', '.join(config.worker_hosts)}")
     trace_path = asyncio.run(_run_scenario(config))
     typer.echo(f"Trace written to: {trace_path}")
 
@@ -155,22 +191,17 @@ def init(
     """Scaffold a new scenario YAML file."""
     target_dir = Path(directory) if directory else Path("scenarios")
     target_dir.mkdir(parents=True, exist_ok=True)
-
     filename = f"{name}.yaml"
     filepath = target_dir / filename
-
     if filepath.exists():
         typer.echo(f"Error: {filepath} already exists.", err=True)
         raise typer.Exit(1)
-
     template = f"""\
 # Nanda Town scenario: {name}
 name: {name}
 description: "TODO: describe your scenario"
-
 tier: 1
 seed: 42
-
 agents:
   count: 20
   brain: state-machine
@@ -179,11 +210,10 @@ agents:
       count: 10
     - name: seller
       count: 10
-
 layers:
   transport: in_memory
   comms: nest_native
-  identity: did_key
+  identity: ed25519_rotating
   registry: in_memory
   auth: jwt
   trust: score_average
@@ -193,19 +223,15 @@ layers:
   memory: blackboard
   privacy: noop
   datafacts: datafacts_v1
-
 task:
   type: marketplace
   config:
     rounds: 5
-
 duration: "ticks: 5000"
-
 metrics:
   - success_rate
   - mean_latency
   - message_count
-
 output:
   trace: ./traces/{name}.jsonl
 """
@@ -214,14 +240,21 @@ output:
 
 
 @app.command()
-def doctor() -> None:
+def doctor(
+    distributed: str | None = _typer_option(
+        None,
+        "--distributed",
+        help="Path to worker manifest dir (contains routes.json) to verify HTTP health.",
+    ),
+) -> None:
     """Check installation, plugin compatibility, and system health."""
+    if distributed is not None:
+        _doctor_distributed(Path(distributed))
+        return
     checks_passed = 0
     checks_failed = 0
-
     typer.echo("Nanda Town doctor")
     typer.echo("=" * 40)
-
     # Python version
     py = sys.version_info
     if py >= (3, 12):
@@ -230,7 +263,6 @@ def doctor() -> None:
     else:
         typer.echo(f"  [FAIL] Python {py.major}.{py.minor} (need >= 3.12)")
         checks_failed += 1
-
     # Core imports
     core_modules = [
         ("nest_core", "nest-core"),
@@ -247,7 +279,6 @@ def doctor() -> None:
         except ImportError as e:
             typer.echo(f"  [FAIL] {label}: {e}")
             checks_failed += 1
-
     # Plugin resolution
     try:
         from nest_core.plugins import PluginRegistry
@@ -281,7 +312,6 @@ def doctor() -> None:
     except Exception as e:
         typer.echo(f"  [FAIL] plugin registry: {e}")
         checks_failed += 1
-
     typer.echo("=" * 40)
     total = checks_passed + checks_failed
     typer.echo(f"{checks_passed}/{total} checks passed")
@@ -289,11 +319,55 @@ def doctor() -> None:
         raise typer.Exit(1)
 
 
+def _doctor_distributed(manifest_dir: Path) -> None:
+    """Verify worker HTTP health endpoints from a distributed manifest."""
+    from nest_core.sim.network_runner import check_health
+
+    routes_path = manifest_dir / "routes.json"
+    if not routes_path.exists():
+        typer.echo(f"Error: routes.json not found in {manifest_dir}", err=True)
+        raise typer.Exit(1)
+    routes = json.loads(routes_path.read_text(encoding="utf-8"))
+    if not isinstance(routes, dict):
+        typer.echo("Error: routes.json must be a JSON object", err=True)
+        raise typer.Exit(1)
+    route_map = cast("dict[str, str]", routes)
+    bases = sorted({v.rstrip("/") for v in route_map.values()})
+    typer.echo("Nanda Town doctor (distributed)")
+    typer.echo("=" * 40)
+    failed = 0
+    for base in bases:
+        ok = asyncio.run(check_health(base))
+        if ok:
+            typer.echo(f"  [OK] {base}/health")
+        else:
+            typer.echo(f"  [FAIL] {base}/health unreachable")
+            failed += 1
+    typer.echo("=" * 40)
+    if failed:
+        raise typer.Exit(1)
+
+
+@worker_app.command("run")
+def worker_run(
+    spec: str = _typer_option(..., "--spec", help="Path to worker-N-spec.json manifest."),
+) -> None:
+    """Run a single distributed worker from a coordinator manifest spec."""
+    from nest_core.sim.worker_main import run_worker_spec
+
+    spec_path = Path(spec)
+    if not spec_path.exists():
+        typer.echo(f"Error: worker spec not found: {spec}", err=True)
+        raise typer.Exit(1)
+    exit_code = asyncio.run(run_worker_spec(spec_path))
+    raise typer.Exit(exit_code)
+
+
 def _default_for(layer: str) -> str:
     defaults: dict[str, str] = {
         "transport": "in_memory",
         "comms": "nest_native",
-        "identity": "did_key",
+        "identity": "ed25519_rotating",
         "registry": "in_memory",
         "auth": "jwt",
         "trust": "score_average",
@@ -318,7 +392,6 @@ def inspect(
     if not path.exists():
         typer.echo(f"Error: trace file not found: {trace}", err=True)
         raise typer.Exit(1)
-
     summary = analyze_trace(path)
     typer.echo(format_summary(summary))
 
@@ -341,14 +414,11 @@ def report(
     if not path.exists():
         typer.echo(f"Error: trace file not found: {trace}", err=True)
         raise typer.Exit(1)
-
     metric_names = metrics.split(",") if metrics else ALL_METRICS
     results = compute_metrics(path, metric_names)
-
     typer.echo("Metrics:")
     for name, value in sorted(results.items()):
         typer.echo(f"  {name:20s} {value:.4f}")
-
     if output:
         out_path = generate_html_report(path, results, output)
         typer.echo(f"\nReport written to: {out_path}")
@@ -359,7 +429,11 @@ def dashboard(
     trace: str | None = _typer_argument(None, help="Optional trace file to load."),
     port: int = _typer_option(8080, help="Port to serve on."),
 ) -> None:
-    """Open the interactive trace dashboard in a browser."""
+    """Open the lightweight static trace viewer in a browser.
+    Serves apps/dashboard/index.html (offline, no npm required). For the full
+    Next.js hackathon app with marketplace pages, run:
+    cd apps/nest-dashboard && npm run dev
+    """
     import functools
     import http.server
     import threading
@@ -369,9 +443,8 @@ def dashboard(
     if dashboard_html is None:
         typer.echo("Error: cannot locate apps/dashboard/index.html", err=True)
         raise typer.Exit(1)
-
+    dashboard_dir = dashboard_html.parent
     html_content = dashboard_html.read_text(encoding="utf-8")
-
     if trace is not None:
         trace_path = Path(trace)
         if not trace_path.exists():
@@ -389,17 +462,17 @@ def dashboard(
             .replace("</", "<\\/")
         )
         html_content = html_content.replace("__NEST_TRACE_DATA__", escaped)
-
     # Serve from a temporary directory with the (possibly modified) HTML
     import tempfile
 
     serve_dir = tempfile.mkdtemp(prefix="nest-dashboard-")
     serve_path = Path(serve_dir) / "index.html"
     serve_path.write_text(html_content, encoding="utf-8")
-
+    d3_src = dashboard_dir / "d3.min.js"
+    if d3_src.exists():
+        (Path(serve_dir) / "d3.min.js").write_bytes(d3_src.read_bytes())
     handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=serve_dir)
     server = http.server.HTTPServer(("127.0.0.1", port), handler)
-
     url = f"http://127.0.0.1:{port}"
     typer.echo(f"Serving dashboard at {url}")
     if trace is not None:
@@ -415,7 +488,6 @@ def dashboard(
 
     t = threading.Thread(target=_open_browser, daemon=True)
     t.start()
-
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -428,15 +500,12 @@ def _find_dashboard_html() -> Path | None:
     """Locate the dashboard HTML file relative to the project root."""
     # Walk up from this file to find the repo root (contains pyproject.toml workspace)
     candidates: list[Path] = []
-
     # Try relative to CWD
     candidates.append(Path.cwd() / "apps" / "dashboard" / "index.html")
-
     # Try relative to this source file
     cli_dir = Path(__file__).resolve().parent  # nest_core/
     for ancestor in [cli_dir.parent, cli_dir.parent.parent, cli_dir.parent.parent.parent]:
         candidates.append(ancestor / "apps" / "dashboard" / "index.html")
-
     for candidate in candidates:
         if candidate.exists():
             return candidate
@@ -505,18 +574,15 @@ def scenarios_cp(
         for n in list_builtin():
             typer.echo(f"  {n}", err=True)
         raise typer.Exit(1)
-
     dest_path = Path(dest)
     if dest_path.is_dir() or (not dest_path.exists() and dest.endswith("/")):
         dest_path = dest_path / f"{name}.yaml"
-
     if dest_path.exists() and not force:
         typer.echo(
             f"Error: {dest_path} already exists. Pass --force to overwrite.",
             err=True,
         )
         raise typer.Exit(1)
-
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     dest_path.write_text(builtin_text(name), encoding="utf-8")
     typer.echo(f"Wrote {dest_path}")
@@ -532,14 +598,12 @@ def plugins_list(
 
     reg = PluginRegistry()
     items = reg.list_plugins(layer)
-
     if not items:
         if layer:
             typer.echo(f"No plugins found for layer: {layer}")
         else:
             typer.echo("No plugins found.")
         return
-
     current_layer = ""
     for layer_name, plugin_name in items:
         if layer_name != current_layer:
@@ -567,11 +631,9 @@ def templates_list() -> None:
 
     reg = TemplateRegistry()
     templates = reg.list_templates()
-
     if not templates:
         typer.echo("No templates found.")
         return
-
     for tpl in templates:
         typer.echo(f"  {tpl.name:30s} {tpl.provider:10s} {tpl.model}")
 
@@ -590,7 +652,6 @@ def templates_show(
     except KeyError:
         typer.echo(f"Error: template not found: {name}", err=True)
         raise typer.Exit(1) from None
-
     typer.echo(f"Name:        {tpl.name}")
     typer.echo(f"Description: {tpl.description}")
     typer.echo(f"Provider:    {tpl.provider}")
@@ -642,7 +703,6 @@ def templates_duplicate(
     except KeyError:
         typer.echo(f"Error: template not found: {name}", err=True)
         raise typer.Exit(1) from None
-
     typer.echo(f"Duplicated '{name}' as '{new_tpl.name}'")
 
 

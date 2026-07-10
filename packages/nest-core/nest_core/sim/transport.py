@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """In-memory transport wired to the simulator's event queue.
-
 Example::
-
     transport = InMemoryTransport(agent_id, event_queue, clock)
     await transport.send(AgentId("a2"), b"hello")
 """
@@ -20,9 +18,7 @@ if TYPE_CHECKING:
 
 class InMemoryTransport:
     """Transport that routes messages through the simulator's event queue.
-
     Example::
-
         transport = InMemoryTransport(AgentId("a1"), queue, clock)
         await transport.send(AgentId("a2"), b"data")
     """
@@ -50,18 +46,18 @@ class InMemoryTransport:
         to: AgentId,
         payload: bytes,
         correlation_id: CorrelationId | None = None,
+        *,
+        deliver_at: float | None = None,
     ) -> None:
         """Enqueue a message delivery event.
-
         Example::
-
             await transport.send(AgentId("a2"), b"hello")
         """
         from nest_core.sim.events import Event
 
         self._queue.push(
             Event(
-                time=self._clock.now,
+                time=deliver_at if deliver_at is not None else self._clock.now,
                 kind="deliver",
                 agent_id=to,
                 target_id=self._agent_id,
@@ -72,9 +68,7 @@ class InMemoryTransport:
 
     async def receive(self) -> tuple[AgentId, bytes]:
         """Not used in Tier 1 — the simulator pushes events to agents.
-
         Example::
-
             # Not applicable in simulation mode
         """
         raise NotImplementedError("Tier 1 transport is push-based via the event queue")
@@ -83,13 +77,18 @@ class InMemoryTransport:
         self,
         payload: bytes,
         correlation_id: CorrelationId | None = None,
+        *,
+        deliver_at: float | None = None,
     ) -> None:
         """Broadcast to all known agents.
-
         Example::
-
             await transport.broadcast(b"announcement")
         """
         for aid in self.all_agents:
             if aid != self._agent_id:
-                await self.send(aid, payload, correlation_id=correlation_id)
+                await self.send(
+                    aid,
+                    payload,
+                    correlation_id=correlation_id,
+                    deliver_at=deliver_at,
+                )

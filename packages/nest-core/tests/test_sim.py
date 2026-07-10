@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the Tier 1 discrete-event simulator.
-
 Covers: clock, event queue, agent lifecycle, determinism, and performance.
 """
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -116,9 +116,7 @@ class TestSimulator:
         ponger = PongAgent()
         sim.add_agent(AgentId("ping"), pinger)
         sim.add_agent(AgentId("pong"), ponger)
-
         await sim.run(max_ticks=100)
-
         assert ponger.received_count >= 1
         assert pinger.received_count >= 1
         assert sim.message_count >= 2
@@ -129,13 +127,10 @@ class TestSimulator:
         sim = Simulator(seed=42, trace_path=trace_file)
         sim.add_agent(AgentId("a1"), PingAgent(target=AgentId("a2")))
         sim.add_agent(AgentId("a2"), PongAgent())
-
         await sim.run(max_ticks=100)
-
         content = trace_file.read_text()
         lines = [line for line in content.strip().split("\n") if line]
         assert len(lines) > 0
-
         import json
 
         for line in lines:
@@ -155,7 +150,6 @@ class TestSimulator:
             sim.add_agent(AgentId("a2"), PongAgent())
             await sim.run(max_ticks=100)
             traces.append(trace_file.read_text())
-
         assert traces[0] == traces[1]
         assert len(traces[0]) > 0
 
@@ -164,7 +158,6 @@ class TestSimulator:
         """100 ping-pong agents converge in <2s."""
         trace_file = tmp_path / "perf_trace.jsonl"
         sim = Simulator(seed=99, trace_path=trace_file)
-
         agent_ids = [AgentId(f"a{i}") for i in range(100)]
         agents: list[PingAgent] = []
         for i, aid in enumerate(agent_ids):
@@ -172,12 +165,26 @@ class TestSimulator:
             agent = PingAgent(target=target)
             agents.append(agent)
             sim.add_agent(aid, agent)
-
         start = time.monotonic()
         await sim.run(max_ticks=10000)
         elapsed = time.monotonic() - start
-
         assert elapsed < 2.0, f"100 agents took {elapsed:.2f}s (limit: 2s)"
+        assert sim.message_count > 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.slow
+    async def test_1000_agents_performance(self, tmp_path: Path) -> None:
+        """1000 ping-pong agents complete in reasonable time after hot-path fixes."""
+        trace_file = tmp_path / "perf1k.jsonl"
+        sim = Simulator(seed=99, trace_path=trace_file)
+        agent_ids = [AgentId(f"a{i}") for i in range(1000)]
+        for i, aid in enumerate(agent_ids):
+            target = agent_ids[(i + 1) % 1000]
+            sim.add_agent(aid, PingAgent(target=target))
+        start = time.monotonic()
+        await sim.run(max_ticks=10000)
+        elapsed = time.monotonic() - start
+        assert elapsed < 30.0, f"1000 agents took {elapsed:.2f}s (limit: 30s)"
         assert sim.message_count > 0
 
     @pytest.mark.asyncio
@@ -187,15 +194,12 @@ class TestSimulator:
         for run in range(2):
             trace_file = tmp_path / f"det_{run}.jsonl"
             sim = Simulator(seed=777, trace_path=trace_file)
-
             agent_ids = [AgentId(f"a{i}") for i in range(100)]
             for i, aid in enumerate(agent_ids):
                 target = agent_ids[(i + 1) % 100]
                 sim.add_agent(aid, PingAgent(target=target))
-
             await sim.run(max_ticks=10000)
             traces.append(trace_file.read_text())
-
         assert traces[0] == traces[1]
         assert len(traces[0]) > 0
 
@@ -213,7 +217,6 @@ class TestSimulator:
 
         sim.add_agent(AgentId("a1"), DelayAgent())
         await sim.run(max_ticks=100000, max_time=50.0)
-
         assert sim.clock.now <= 50.0
 
     @pytest.mark.asyncio
@@ -231,6 +234,56 @@ class TestSimulator:
 
         sim.add_agent(AgentId("timer"), TimerAgent())
         await sim.run(max_ticks=100)
-
         assert len(received) == 1
         assert received[0] == 5.0
+
+
+class TestSimulatorEdgeCases:
+    @pytest.mark.asyncio
+    async def test_zero_agents(self) -> None:
+        sim = Simulator(seed=1)
+        await sim.run(max_ticks=10)
+        assert sim.tick_count == 0
+
+    @pytest.mark.asyncio
+    async def test_max_ticks_zero(self) -> None:
+        sim = Simulator(seed=1)
+        sim.add_agent(AgentId("a1"), PongAgent())
+        await sim.run(max_ticks=0)
+        assert sim.tick_count == 0
+
+    @pytest.mark.asyncio
+    async def test_duplicate_agent_id_raises(self) -> None:
+        sim = Simulator(seed=1)
+        sim.add_agent(AgentId("a1"), PongAgent())
+        with pytest.raises(ValueError):
+            sim.add_agent(AgentId("a1"), PongAgent())
+
+    @pytest.mark.asyncio
+    async def test_send_to_unknown_agent_is_silent(self, tmp_path: Path) -> None:
+        """Messages to unregistered agents are sent but never delivered."""
+        trace_file = tmp_path / "unknown.jsonl"
+        sim = Simulator(seed=1, trace_path=trace_file)
+        sim.add_agent(AgentId("a1"), PingAgent(target=AgentId("missing")))
+        await sim.run(max_ticks=50)
+        assert sim.message_count == 0
+        lines = [json.loads(line) for line in trace_file.read_text().splitlines() if line]
+        kinds = {ev["kind"] for ev in lines}
+        assert "send" in kinds
+        assert "receive" not in kinds
+
+    @pytest.mark.asyncio
+    async def test_on_start_exception_propagates(self) -> None:
+        sim = Simulator(seed=1)
+
+        class BoomAgent(StateMachineAgent):
+            async def on_start(self, ctx: AgentContext) -> None:
+                msg = "boom"
+                raise RuntimeError(msg)
+
+            async def on_message(self, ctx: AgentContext, sender: AgentId, payload: bytes) -> None:
+                pass
+
+        sim.add_agent(AgentId("a1"), BoomAgent())
+        with pytest.raises(RuntimeError, match="boom"):
+            await sim.run(max_ticks=10)

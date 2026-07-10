@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Pydantic schema for Nanda Town scenario YAML files.
-
 Example::
-
     from nest_core.scenario import ScenarioConfig
     config = ScenarioConfig.from_yaml("scenarios/marketplace.yaml")
 """
@@ -18,9 +16,7 @@ from pydantic import BaseModel, Field, field_validator
 
 class RoleConfig(BaseModel):
     """Configuration for a specific agent role within a scenario.
-
     Example::
-
         role = RoleConfig(name="buyer", count=50, prompt_template="buyer_v1")
     """
 
@@ -40,9 +36,7 @@ class RoleConfig(BaseModel):
 
 class AgentConfig(BaseModel):
     """Agent configuration for a scenario.
-
     Example::
-
         agents = AgentConfig(count=100, brain="state-machine")
     """
 
@@ -64,15 +58,13 @@ class AgentConfig(BaseModel):
 
 class LayerConfig(BaseModel):
     """Plugin selection for each of the 12 layers.
-
     Example::
-
         layers = LayerConfig(transport="in_memory", comms="nest_native")
     """
 
     transport: str = "in_memory"
     comms: str = "nest_native"
-    identity: str = "did_key"
+    identity: str = "ed25519_rotating"
     registry: str = "in_memory"
     auth: str = "jwt"
     trust: str = "score_average"
@@ -86,9 +78,7 @@ class LayerConfig(BaseModel):
 
 class TaskConfig(BaseModel):
     """Task configuration for the scenario.
-
     Example::
-
         task = TaskConfig(type="marketplace", config={"catalog_size": 200})
     """
 
@@ -98,15 +88,14 @@ class TaskConfig(BaseModel):
 
 class FailureConfig(BaseModel):
     """Failure injection configuration.
-
     Example::
-
         failures = FailureConfig(message_drop=0.05, byzantine_agents=0.10)
     """
 
     message_drop: float = 0.0
     byzantine_agents: float = 0.0
     network_partition: dict[str, Any] | None = None
+    partition_heal_at_tick: int | None = None
 
     @field_validator("message_drop", "byzantine_agents")
     @classmethod
@@ -119,9 +108,7 @@ class FailureConfig(BaseModel):
 
 class OutputConfig(BaseModel):
     """Output configuration for traces and reports.
-
     Example::
-
         output = OutputConfig(trace="./traces/out.jsonl")
     """
 
@@ -129,11 +116,22 @@ class OutputConfig(BaseModel):
     report: str | None = None
 
 
+class MiddlewareEntry(BaseModel):
+    """A named middleware plugin with optional configuration."""
+
+    name: str
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class DistributedConfig(BaseModel):
+    """Distributed execution options."""
+
+    shared_registry: bool = False
+
+
 class ScenarioConfig(BaseModel):
     """Top-level scenario configuration parsed from YAML.
-
     Example::
-
         config = ScenarioConfig(name="test", tier=1)
     """
 
@@ -144,10 +142,33 @@ class ScenarioConfig(BaseModel):
     layers: LayerConfig = Field(default_factory=LayerConfig)
     task: TaskConfig = Field(default_factory=TaskConfig)
     failures: FailureConfig = Field(default_factory=FailureConfig)
+    middleware: list[MiddlewareEntry] = Field(default_factory=lambda: list[MiddlewareEntry]())
     duration: str = "ticks: 10000"
     metrics: list[str] = Field(default_factory=list)
     output: OutputConfig = Field(default_factory=OutputConfig)
     seed: int = 0
+    parallel: bool = False
+    workers: int = 1
+    worker_bind: str = "127.0.0.1"
+    worker_hosts: list[str] | None = None
+    worker_mode: str = "auto"
+    distributed: DistributedConfig = Field(default_factory=DistributedConfig)
+
+    @field_validator("worker_mode")
+    @classmethod
+    def _valid_worker_mode(cls, value: str) -> str:
+        if value not in ("auto", "manual"):
+            msg = "worker_mode must be 'auto' or 'manual'"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("workers")
+    @classmethod
+    def _workers_positive(cls, value: int) -> int:
+        if value < 1:
+            msg = "workers must be >= 1"
+            raise ValueError(msg)
+        return value
 
     @field_validator("tier")
     @classmethod
@@ -175,9 +196,7 @@ class ScenarioConfig(BaseModel):
 
     def get_max_ticks(self) -> int:
         """Parse the duration field into max ticks.
-
         Example::
-
             ticks = config.get_max_ticks()
         """
         if self.duration.startswith("ticks:"):
@@ -187,9 +206,7 @@ class ScenarioConfig(BaseModel):
     @classmethod
     def from_yaml(cls, path: str | Path) -> ScenarioConfig:
         """Load a scenario configuration from a YAML file.
-
         Example::
-
             config = ScenarioConfig.from_yaml("scenarios/marketplace.yaml")
         """
         with Path(path).open() as f:
@@ -199,9 +216,7 @@ class ScenarioConfig(BaseModel):
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ScenarioConfig:
         """Create a scenario from a dictionary.
-
         Example::
-
             config = ScenarioConfig.from_dict({"name": "test", "tier": 1})
         """
         return cls.model_validate(data)

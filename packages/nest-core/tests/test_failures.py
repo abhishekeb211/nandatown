@@ -41,7 +41,6 @@ class TestMessageDrop:
         sim.add_agent(AgentId("a"), a)
         sim.add_agent(AgentId("b"), b)
         await sim.run(max_ticks=10000)
-
         assert sim.dropped_count == 0
         assert sim.message_count > 0
 
@@ -55,7 +54,6 @@ class TestMessageDrop:
             agents.append(agent)
             sim.add_agent(AgentId(f"a-{i}"), agent)
         await sim.run(max_ticks=50000)
-
         assert sim.dropped_count > 0
         assert sim.message_count > 0
 
@@ -67,7 +65,6 @@ class TestMessageDrop:
         sim.add_agent(AgentId("a"), a)
         sim.add_agent(AgentId("b"), b)
         await sim.run(max_ticks=10000)
-
         assert sim.message_count == 0
         assert sim.dropped_count > 0
 
@@ -80,7 +77,6 @@ class TestMessageDrop:
         sim.add_agent(AgentId("a"), a)
         sim.add_agent(AgentId("b"), b)
         await sim.run(max_ticks=10000)
-
         content = trace_file.read_text()
         lines = [ln for ln in content.strip().split("\n") if ln]
         dropped_events = [json.loads(ln) for ln in lines if '"dropped"' in ln]
@@ -102,7 +98,6 @@ class TestNetworkPartition:
         sim.add_agent(AgentId("a"), a)
         sim.add_agent(AgentId("b"), b)
         await sim.run(max_ticks=10000)
-
         assert sim.message_count == 0
         assert sim.dropped_count > 0
 
@@ -118,7 +113,6 @@ class TestNetworkPartition:
         sim.add_agent(AgentId("a"), a)
         sim.add_agent(AgentId("b"), b)
         await sim.run(max_ticks=10000)
-
         assert sim.message_count > 0
         assert sim.dropped_count == 0
 
@@ -137,20 +131,33 @@ class TestByzantineAgents:
         sim.add_agent(AgentId("a"), a)
         sim.add_agent(AgentId("b"), b)
         await sim.run(max_ticks=10000)
-
         assert sim.message_count > 0
         all_received = a.received + b.received
         corrupted = sum(
             1 for r in all_received if not r.decode("utf-8", errors="replace").startswith("ping-")
         )
         assert corrupted > 0
-
         receive_events = [
             json.loads(line)
             for line in trace_file.read_text().splitlines()
             if line and json.loads(line).get("kind") == "receive"
         ]
         assert any(not ev["msg"].startswith("ping-") for ev in receive_events)
+
+    @pytest.mark.asyncio
+    async def test_byzantine_trace_deterministic_with_randbytes(self, tmp_path: Path) -> None:
+        """Byzantine mangling uses randbytes — same seed yields identical traces."""
+        traces: list[str] = []
+        for i in range(2):
+            trace_file = tmp_path / f"byz_{i}.jsonl"
+            sim = Simulator(seed=99, trace_path=trace_file, byzantine_fraction=0.5)
+            a = PingAgent(AgentId("b"), rounds=8)
+            b = PingAgent(AgentId("a"), rounds=8)
+            sim.add_agent(AgentId("a"), a)
+            sim.add_agent(AgentId("b"), b)
+            await sim.run(max_ticks=5000)
+            traces.append(trace_file.read_text())
+        assert traces[0] == traces[1]
 
 
 class TestFailureViaRunner:
@@ -174,14 +181,11 @@ class TestFailureViaRunner:
                 "output": {"trace": str(trace_file)},
             }
         )
-
         runner = ScenarioRunner(config)
         result = await runner.run()
-
         assert result.exists()
         content = result.read_text()
         lines = [ln for ln in content.strip().split("\n") if ln]
-
         dropped = 0
         received = 0
         for line in lines:
@@ -190,6 +194,53 @@ class TestFailureViaRunner:
                 dropped += 1
             elif event["kind"] == "receive":
                 received += 1
-
         assert dropped > 0
         assert received > 0
+
+
+class TestCombinedFailures:
+    @pytest.mark.asyncio
+    async def test_byzantine_and_partition(self, tmp_path: Path) -> None:
+        sim = Simulator(
+            seed=42,
+            trace_path=tmp_path / "combo.jsonl",
+            byzantine_fraction=0.5,
+            partition_groups=[["a"], ["b"]],
+        )
+        a = PingAgent(AgentId("b"), rounds=5)
+        b = PingAgent(AgentId("a"), rounds=5)
+        sim.add_agent(AgentId("a"), a)
+        sim.add_agent(AgentId("b"), b)
+        await sim.run(max_ticks=10000)
+        assert sim.message_count == 0
+        assert sim.dropped_count > 0
+
+    @pytest.mark.asyncio
+    async def test_three_partition_groups(self, tmp_path: Path) -> None:
+        sim = Simulator(
+            seed=7,
+            trace_path=tmp_path / "tripart.jsonl",
+            partition_groups=[["a"], ["b"], ["c"]],
+        )
+        for name in ("a", "b", "c"):
+            others = [AgentId(x) for x in ("a", "b", "c") if x != name]
+            sim.add_agent(AgentId(name), PingAgent(others[0], rounds=3))
+        await sim.run(max_ticks=5000)
+        assert sim.message_count == 0
+
+    @pytest.mark.asyncio
+    async def test_byzantine_fraction_zero(self, tmp_path: Path) -> None:
+        trace_file = tmp_path / "no-byz.jsonl"
+        sim = Simulator(seed=42, trace_path=trace_file, byzantine_fraction=0.0)
+        a = PingAgent(AgentId("b"), rounds=5)
+        b = PingAgent(AgentId("a"), rounds=5)
+        sim.add_agent(AgentId("a"), a)
+        sim.add_agent(AgentId("b"), b)
+        await sim.run(max_ticks=5000)
+        assert sim.message_count > 0
+        receive_events = [
+            json.loads(line)
+            for line in trace_file.read_text().splitlines()
+            if line and json.loads(line).get("kind") == "receive"
+        ]
+        assert all(ev["msg"].startswith("ping-") for ev in receive_events)

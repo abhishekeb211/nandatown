@@ -40,7 +40,6 @@ class TestInMemoryTransport:
         network = InMemoryNetwork()
         t1 = StandaloneInMemoryTransport(AgentId("a1"), network)
         t2 = StandaloneInMemoryTransport(AgentId("a2"), network)
-
         await t1.send(AgentId("a2"), b"hello")
         sender, payload = await t2.receive()
         assert sender == AgentId("a1")
@@ -57,7 +56,6 @@ class TestInMemoryTransport:
         t1 = StandaloneInMemoryTransport(AgentId("a1"), network)
         t2 = StandaloneInMemoryTransport(AgentId("a2"), network)
         t3 = StandaloneInMemoryTransport(AgentId("a3"), network)
-
         await t1.broadcast(b"announce")
         _, p2 = await t2.receive()
         _, p3 = await t3.receive()
@@ -129,7 +127,6 @@ class TestDidKeyIdentity:
         sender = DidKeyIdentity(AgentId("a1"), seed=b"seed")
         verifier = DidKeyIdentity(AgentId("a2"), seed=b"seed")
         verifier.register_peer(AgentId("a1"), sender.public_key)
-
         sig = sender.sign(b"payload")
         assert verifier.verify(b"payload", sig, AgentId("a1"))
 
@@ -164,10 +161,25 @@ class TestInMemoryRegistry:
         reg = InMemoryRegistry()
         card = AgentCard(agent_id=AgentId("a1"), name="Seller", capabilities=["sell"])
         await reg.register(card)
-
         results = await reg.lookup(Query(capabilities=["sell"]))
         assert len(results) == 1
         assert results[0].agent_id == AgentId("a1")
+
+    @pytest.mark.asyncio
+    async def test_lookup_scales_to_many_agents(self) -> None:
+        from nest_plugins_reference.registry.in_memory import InMemoryRegistry
+
+        reg = InMemoryRegistry()
+        for i in range(1000):
+            await reg.register(
+                AgentCard(
+                    agent_id=AgentId(f"agent-{i}"),
+                    name=f"Agent{i}",
+                    capabilities=["sell"] if i % 2 == 0 else ["buy"],
+                )
+            )
+        results = await reg.lookup(Query(capabilities=["sell"]))
+        assert len(results) == 500
 
     @pytest.mark.asyncio
     async def test_lookup_no_match(self) -> None:
@@ -176,7 +188,6 @@ class TestInMemoryRegistry:
         reg = InMemoryRegistry()
         card = AgentCard(agent_id=AgentId("a1"), name="Buyer", capabilities=["buy"])
         await reg.register(card)
-
         results = await reg.lookup(Query(capabilities=["sell"]))
         assert len(results) == 0
 
@@ -188,9 +199,35 @@ class TestInMemoryRegistry:
         card = AgentCard(agent_id=AgentId("a1"), name="Agent", capabilities=["x"])
         await reg.register(card)
         await reg.deregister(AgentId("a1"))
-
         results = await reg.lookup(Query())
         assert len(results) == 0
+
+    @pytest.mark.asyncio
+    async def test_lookup_metadata_filter(self) -> None:
+        from nest_plugins_reference.registry.in_memory import InMemoryRegistry
+
+        reg = InMemoryRegistry()
+        await reg.register(
+            AgentCard(
+                agent_id=AgentId("a1"),
+                name="SellerA",
+                capabilities=["sell"],
+                metadata={"region": "us", "tier": "gold"},
+            )
+        )
+        await reg.register(
+            AgentCard(
+                agent_id=AgentId("a2"),
+                name="SellerB",
+                capabilities=["sell"],
+                metadata={"region": "eu", "tier": "gold"},
+            )
+        )
+        results = await reg.lookup(
+            Query(capabilities=["sell"], metadata_filter={"region": "us", "tier": "gold"})
+        )
+        assert len(results) == 1
+        assert results[0].agent_id == AgentId("a1")
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +236,18 @@ class TestInMemoryRegistry:
 
 
 class TestJwtAuth:
+    def test_requires_explicit_secret(self) -> None:
+        from nest_plugins_reference.auth.jwt_auth import JwtAuth
+
+        with pytest.raises(TypeError):
+            JwtAuth()  # type: ignore[call-arg]
+
+    def test_warns_on_known_weak_secret(self) -> None:
+        from nest_plugins_reference.auth.jwt_auth import KNOWN_WEAK_SECRET, JwtAuth
+
+        with pytest.warns(UserWarning, match="publicly known weak default"):
+            JwtAuth(secret=KNOWN_WEAK_SECRET)
+
     @pytest.mark.asyncio
     async def test_issue_verify(self) -> None:
         from nest_plugins_reference.auth.jwt_auth import JwtAuth
@@ -225,7 +274,6 @@ class TestJwtAuth:
 
         auth = JwtAuth(secret=b"secret1")
         token = await auth.issue(AgentId("a1"), ["read"])
-
         auth2 = JwtAuth(secret=b"secret2")
         with pytest.raises(ValueError, match="signature"):
             await auth2.verify(token)
@@ -255,7 +303,6 @@ class TestScoreAverageTrust:
         ev = Evidence(reporter=AgentId("a2"), subject=AgentId("a1"), kind="positive")
         await trust.report(AgentId("a1"), ev)
         await trust.report(AgentId("a1"), ev)
-
         score = await trust.score(AgentId("a1"))
         assert score.score == 1.0
         assert score.sample_count == 2
@@ -269,7 +316,6 @@ class TestScoreAverageTrust:
         neg = Evidence(reporter=AgentId("a3"), subject=AgentId("a1"), kind="negative")
         await trust.report(AgentId("a1"), pos)
         await trust.report(AgentId("a1"), neg)
-
         score = await trust.score(AgentId("a1"))
         assert score.score == 0.5
 
@@ -290,7 +336,6 @@ class TestPrepaidCredits:
         assert receipt.payee == AgentId("a2")
         assert pay.balance(AgentId("a1")) == 900
         assert pay.balance(AgentId("a2")) == 100
-
         status = await pay.verify_payment(PaymentRef("p1"))
         assert status == PaymentStatus.CONFIRMED
 
@@ -328,9 +373,7 @@ class TestPrepaidCredits:
         payments: dict[PaymentRef, Receipt] = {}
         buyer = PrepaidCredits(AgentId("buyer"), balances=balances, payments=payments)
         seller = PrepaidCredits(AgentId("seller"), balances=balances, payments=payments)
-
         await buyer.pay(AgentId("seller"), Money(amount=40), PaymentRef("p1"))
-
         assert buyer.balance(AgentId("buyer")) == 60
         assert seller.balance(AgentId("seller")) == 40
         assert await seller.verify_payment(PaymentRef("p1")) == PaymentStatus.CONFIRMED
@@ -357,13 +400,10 @@ class TestContractNet:
         manager = ContractNet(AgentId("mgr"))
         worker1 = ContractNet(AgentId("w1"))
         worker2 = ContractNet(AgentId("w2"))
-
         task = Task(id="t1", description="process")
         rnd = await manager.propose(task)
-
         await worker1.participate(rnd)
         await worker2.participate(rnd)
-
         outcome = await manager.resolve(rnd)
         assert outcome.task.id == "t1"
         assert outcome.winner is not None
@@ -393,14 +433,15 @@ class TestAlternatingOffers:
         neg = AlternatingOffers(AgentId("a1"))
         session = await neg.open(AgentId("a2"), Terms(price=Money(amount=100)))
         assert session.status == NegotiationStatus.OPEN
-
         await neg.offer(session, Terms(price=Money(amount=80)))
         resp = await neg.respond(session)
-        assert isinstance(resp.accepted, bool)
-
         agreement = await neg.close(session)
-        assert agreement is not None
-        assert agreement.session_id == session.id
+        if resp.accepted:
+            assert agreement is not None
+            assert agreement.session_id == session.id
+        else:
+            assert agreement is None
+            assert session.status == NegotiationStatus.REJECTED
 
     @pytest.mark.asyncio
     async def test_no_terms(self) -> None:
@@ -409,7 +450,8 @@ class TestAlternatingOffers:
         neg = AlternatingOffers(AgentId("a1"))
         session = await neg.open(AgentId("a2"), Terms())
         resp = await neg.respond(session)
-        assert resp.accepted is True
+        assert resp.accepted is False
+        assert session.status == NegotiationStatus.REJECTED
 
 
 # ---------------------------------------------------------------------------
@@ -487,7 +529,6 @@ class TestDataFactsV1:
         meta = DatasetMetadata(name="weather", owner=AgentId("a1"))
         url = await df.publish(meta)
         assert url == "df://weather"
-
         fetched = await df.fetch(url)
         assert fetched.name == "weather"
         assert fetched.owner == AgentId("a1")

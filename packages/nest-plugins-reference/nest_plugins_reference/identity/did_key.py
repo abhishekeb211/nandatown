@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """DID:key identity plugin — deterministic public-key signatures for simulation.
-
 This is intentionally dependency-free and deterministic so traces replay
 byte-for-byte.  It is not production cryptography; for real deployments, swap
 to a proper Ed25519 implementation.
-
 Example::
-
     identity = DidKeyIdentity(AgentId("a1"), seed=b"secret")
     sig = identity.sign(b"payload")
     ok = identity.verify(b"payload", sig, AgentId("a1"))
@@ -17,20 +14,30 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import warnings
 
 from nest_core.types import AgentId, AgentIdentity, Signature
 
 
 class DidKeyIdentity:
     """Public-verifiable identity for simulation.
-
     Example::
-
         ident = DidKeyIdentity(AgentId("a1"), seed=b"seed")
         sig = ident.sign(b"hello")
     """
 
+    _warned: bool = False
+
     def __init__(self, agent_id: AgentId, seed: bytes = b"") -> None:
+        if not DidKeyIdentity._warned:
+            warnings.warn(
+                "DidKeyIdentity uses deterministic textbook RSA (~512-bit) for "
+                "simulation only; it is not production cryptography. Prefer "
+                "ed25519_rotating for real deployments.",
+                stacklevel=2,
+                category=UserWarning,
+            )
+            DidKeyIdentity._warned = True
         self._agent_id = agent_id
         self._seed = seed
         self._public_numbers, self._private_exponent = _derive_keypair(seed, agent_id)
@@ -44,9 +51,7 @@ class DidKeyIdentity:
         private_key: bytes | None = None,
     ) -> None:
         """Register a peer's public key for verification.
-
         Example::
-
             ident.register_peer(AgentId("a2"), peer_pk)
         """
         if private_key is not None:
@@ -57,18 +62,14 @@ class DidKeyIdentity:
     @property
     def public_key(self) -> bytes:
         """This agent's public key.
-
         Example::
-
             pk = ident.public_key
         """
         return self._public_key
 
     def sign(self, payload: bytes) -> Signature:
         """Sign a payload with this agent's private key.
-
         Example::
-
             sig = ident.sign(b"data")
         """
         n, _e = self._public_numbers
@@ -80,9 +81,7 @@ class DidKeyIdentity:
 
     def verify(self, payload: bytes, sig: Signature, agent: AgentId) -> bool:
         """Verify a signature from a given agent.
-
         Example::
-
             ok = ident.verify(b"data", sig, AgentId("a1"))
         """
         if sig.signer != agent:
@@ -100,9 +99,7 @@ class DidKeyIdentity:
 
     async def resolve(self, agent: AgentId) -> AgentIdentity:
         """Resolve an agent ID to its identity record.
-
         Example::
-
             info = await ident.resolve(AgentId("a1"))
         """
         public_numbers = self._known_keys.get(agent)
@@ -152,13 +149,11 @@ def _is_probable_prime(n: int) -> bool:
             return True
         if n % prime == 0:
             return False
-
     d = n - 1
     s = 0
     while d % 2 == 0:
         s += 1
         d //= 2
-
     for base in small_primes:
         if base >= n:
             continue

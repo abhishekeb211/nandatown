@@ -106,7 +106,7 @@ class TestPluginRegistry:
         for layer, name in [
             ("transport", "in_memory"),
             ("comms", "nest_native"),
-            ("identity", "did_key"),
+            ("identity", "ed25519_rotating"),
             ("registry", "in_memory"),
             ("auth", "jwt"),
             ("trust", "score_average"),
@@ -129,6 +129,7 @@ class TestPluginRegistry:
         reg = PluginRegistry()
         plugins = reg.list_plugins("payments")
         assert ("payments", "prepaid_credits") in plugins
+        assert ("payments", "empic_escrow") in plugins
 
 
 # ---------------------------------------------------------------------------
@@ -148,10 +149,8 @@ class TestMarketplaceScenario:
         buyer_identity = DidKeyIdentity(buyer_id, seed=b"sim-seed")
         seller_identity.register_peer(buyer_id, buyer_identity.public_key)
         ctx = _FakeAgentContext(seller_id, {"identity": seller_identity})
-
         seller = SellerAgent(seller_id, min_price=10)
         await seller.on_message(ctx, buyer_id, b"buy:product-0:50|sig:00")
-
         assert ctx.sent == []
 
     @pytest.mark.asyncio
@@ -173,18 +172,14 @@ class TestMarketplaceScenario:
                 "output": {"trace": str(trace_file)},
             }
         )
-
         runner = ScenarioRunner(config)
         result_path = await runner.run()
-
         assert result_path.exists()
         content = result_path.read_text()
         lines = [ln for ln in content.strip().split("\n") if ln]
         assert len(lines) > 0
-
         validations = validate_trace(result_path, "marketplace")
         assert all(r.passed for r in validations), validations
-
         payments = runner.resolved_plugins["payments"]
         assert len(payments._payments) > 0  # noqa: SLF001
         balances = payments._balances  # noqa: SLF001
@@ -194,7 +189,6 @@ class TestMarketplaceScenario:
         assert any(
             balance > 1000 for aid, balance in balances.items() if str(aid).startswith("seller-")
         )
-
         for line in lines:
             event = json.loads(line)
             assert "ts" in event
@@ -207,14 +201,11 @@ class TestMarketplaceScenario:
         yaml_path = Path(__file__).parent.parent.parent.parent / "scenarios" / "marketplace.yaml"
         if not yaml_path.exists():
             pytest.skip("marketplace.yaml not found")
-
         config = ScenarioConfig.from_yaml(yaml_path)
         config.output.trace = str(tmp_path / "marketplace.jsonl")
         config.duration = "ticks: 5000"
-
         runner = ScenarioRunner(config)
         result_path = await runner.run()
-
         assert result_path.exists()
         content = result_path.read_text()
         lines = [ln for ln in content.strip().split("\n") if ln]
@@ -239,6 +230,45 @@ class TestMarketplaceScenario:
             runner = ScenarioRunner(config)
             await runner.run()
             traces.append(trace_file.read_text())
-
         assert traces[0] == traces[1]
         assert len(traces[0]) > 0
+
+
+class TestEmpicPaymentsScenario:
+    """End-to-end checks for the EMPIC payments scenario."""
+
+    @pytest.mark.asyncio
+    async def test_empic_payments_yaml(self, tmp_path: Path) -> None:
+        """Run the EMPIC weather market and validate escrow invariants."""
+        yaml_path = Path(__file__).parent.parent.parent.parent / "scenarios" / "empic_payments.yaml"
+        config = ScenarioConfig.from_yaml(yaml_path)
+        config.output.trace = str(tmp_path / "empic_payments.jsonl")
+        config.duration = "ticks: 2000"
+        runner = ScenarioRunner(config)
+        result_path = await runner.run()
+        assert result_path.exists()
+        validations = validate_trace(result_path, "empic_payments")
+        assert all(r.passed for r in validations), validations
+        payments = runner.resolved_plugins["payments"]
+        assert len(payments._payments) == 6  # noqa: SLF001
+        assert payments.balance(AgentId("empic-escrow")) == 0
+        assert payments.balance(AgentId("provider-0")) > 1000
+        assert payments.balance(AgentId("provider-1")) == 1000
+        assert payments.balance(AgentId("provider-4")) > 1000
+        assert payments.balance(AgentId("provider-5")) == 1000
+
+    @pytest.mark.asyncio
+    async def test_empic_payments_partition_yaml(self, tmp_path: Path) -> None:
+        """Run the partition variant and confirm overbilling does not occur."""
+        yaml_path = (
+            Path(__file__).parent.parent.parent.parent
+            / "scenarios"
+            / "empic_payments_partition.yaml"
+        )
+        config = ScenarioConfig.from_yaml(yaml_path)
+        config.output.trace = str(tmp_path / "empic_payments_partition.jsonl")
+        config.duration = "ticks: 2000"
+        runner = ScenarioRunner(config)
+        result_path = await runner.run()
+        validations = validate_trace(result_path, "empic_payments")
+        assert all(r.passed for r in validations), validations
